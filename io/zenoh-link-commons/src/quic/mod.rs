@@ -11,6 +11,8 @@
 // Contributors:
 //   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
 //
+#[cfg(feature = "quic_noq")]
+pub mod multipath;
 mod plaintext;
 mod socket;
 mod utils;

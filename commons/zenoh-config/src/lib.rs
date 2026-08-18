@@ -813,6 +813,30 @@ validated_struct::validator! {
                 UnixPipeConf {
                     file_access_mask: Option<u32>
                 },
+                pub quic: #[derive(Default)]
+                QuicConf {
+                    /// Experimental Multipath QUIC settings. Effective only when Zenoh is
+                    /// built with the experimental noq QUIC backend (`transport_quic_noq`).
+                    pub multipath: #[derive(Default)]
+                    QuicMultipathConf {
+                        /// Enables Multipath QUIC negotiation. Must be enabled on both the
+                        /// connecting and the listening side.
+                        enabled: Option<bool>,
+                        /// Maximum number of concurrent paths to negotiate (default 4).
+                        max_concurrent_paths: Option<u32>,
+                        /// Path list for the connecting side. Each entry is
+                        /// "iface:<name>[@<remote_addr>]" or "local:<ip>[@<remote_addr>]";
+                        /// the first entry pins the primary (handshake) path's local side,
+                        /// later entries are opened as additional paths. When omitted the
+                        /// remote defaults to the primary remote from the locator.
+                        /// Listeners leave this empty.
+                        paths: Option<Vec<String>>,
+                        /// Per-path keep-alive interval in milliseconds (default 1000).
+                        keep_alive_interval_ms: Option<u64>,
+                        /// Per-path max idle timeout in milliseconds (default 3000).
+                        max_idle_timeout_ms: Option<u64>,
+                    },
+                },
             },
             pub shared_memory:
             ShmConf {

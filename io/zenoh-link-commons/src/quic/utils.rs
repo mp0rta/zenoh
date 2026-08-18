@@ -182,6 +182,42 @@ impl ConfigurationInspector<ZenohConfig> for TlsConfigurator {
             false => ps.push((TLS_CLOSE_LINK_ON_EXPIRATION, "false")),
         }
 
+        // Experimental multipath settings (noq backend only): flattened into
+        // the same per-link config string, consumed by quic::multipath.
+        #[cfg(feature = "quic_noq")]
+        let multipath_owned;
+        #[cfg(feature = "quic_noq")]
+        {
+            use crate::quic::multipath::{
+                MULTIPATH, MULTIPATH_IDLE_TIMEOUT_MS, MULTIPATH_KEEP_ALIVE_MS, MULTIPATH_MAX_PATHS,
+                MULTIPATH_PATHS,
+            };
+            let mp = config.transport().link().quic().multipath();
+            if mp.enabled().unwrap_or(false) {
+                multipath_owned = (
+                    mp.paths().as_ref().map(|paths| paths.join("|")),
+                    mp.max_concurrent_paths().map(|v| v.to_string()),
+                    mp.keep_alive_interval_ms().map(|v| v.to_string()),
+                    mp.max_idle_timeout_ms().map(|v| v.to_string()),
+                );
+                ps.push((MULTIPATH, "true"));
+                if let Some(paths) = multipath_owned.0.as_deref() {
+                    if !paths.is_empty() {
+                        ps.push((MULTIPATH_PATHS, paths));
+                    }
+                }
+                if let Some(v) = multipath_owned.1.as_deref() {
+                    ps.push((MULTIPATH_MAX_PATHS, v));
+                }
+                if let Some(v) = multipath_owned.2.as_deref() {
+                    ps.push((MULTIPATH_KEEP_ALIVE_MS, v));
+                }
+                if let Some(v) = multipath_owned.3.as_deref() {
+                    ps.push((MULTIPATH_IDLE_TIMEOUT_MS, v));
+                }
+            }
+        }
+
         Ok(parameters::from_iter(ps.drain(..)))
     }
 }
