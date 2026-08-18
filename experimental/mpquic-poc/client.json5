@@ -1,0 +1,23 @@
+{
+  mode: "client",
+  connect: { endpoints: ["quic/10.10.0.2:7447"] },
+  scouting: { multicast: { enabled: false } },
+  transport: {
+    link: {
+      tls: {
+        root_ca_certificate: "experimental/mpquic-poc/certs/ca.pem",
+      },
+      quic: {
+        multipath: {
+          enabled: true,
+          max_concurrent_paths: 4,
+          // First entry pins the primary (handshake) path's local side; the
+          // iface form uses one SO_BINDTODEVICE socket per NIC (needs root).
+          paths: ["iface:c0", "iface:c1@10.20.0.2:7447"],
+          keep_alive_interval_ms: 1000,
+          max_idle_timeout_ms: 3000,
+        },
+      },
+    },
+  },
+}
