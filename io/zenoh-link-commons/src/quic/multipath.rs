@@ -23,6 +23,11 @@
 
 use std::{net::IpAddr, net::SocketAddr, str::FromStr, time::Duration};
 
+use futures::StreamExt;
+// This module is compiled only under the quic_noq feature, so it names noq
+// directly (the per-file `backend` aliases in the sibling modules are local
+// to those files).
+use noq as backend;
 use zenoh_protocol::core::endpoint::Config;
 use zenoh_result::{bail, zerror, ZResult};
 
@@ -155,6 +160,116 @@ impl MultipathConfig {
                 DEFAULT_IDLE_TIMEOUT_MS,
             )?),
         }))
+    }
+}
+
+/// Spawns a task that logs path lifecycle events for this connection
+/// (spec_draft.md section 12). noq never emits `Established` for the primary
+/// path (PathId 0, established by the handshake itself), so callers log that
+/// one explicitly at connection setup.
+pub fn spawn_path_event_logger(conn: backend::Connection, side: &'static str) {
+    let events = conn.path_events();
+    let conn_id = conn.stable_id();
+    zenoh_runtime::ZRuntime::Acceptor.spawn(async move {
+        let mut events = std::pin::pin!(events);
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(backend::PathEvent::Established { id, .. }) => {
+                    tracing::info!("connection={conn_id} path={id:?} side={side} state=active");
+                }
+                Ok(backend::PathEvent::Abandoned { id, reason, .. }) => {
+                    tracing::warn!(
+                        "connection={conn_id} path={id:?} side={side} state=failed reason={reason:?}"
+                    );
+                }
+                Ok(backend::PathEvent::Discarded { id, path_stats, .. }) => {
+                    tracing::info!("connection={conn_id} path={id:?} side={side} state=discarded");
+                    tracing::debug!(
+                        "connection={conn_id} path={id:?} side={side} final stats={path_stats:?}"
+                    );
+                }
+                Ok(other) => {
+                    tracing::debug!("connection={conn_id} side={side} path_event={other:?}");
+                }
+                Err(lagged) => {
+                    tracing::warn!(
+                        "connection={conn_id} side={side} path_events lagged: {lagged:?}"
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Opens the configured additional paths on an established client connection
+/// (spec_draft.md section 9). Failures are logged, not fatal: the session
+/// continues on the primary path.
+pub async fn open_additional_paths(
+    conn: &backend::Connection,
+    config: &MultipathConfig,
+    primary_remote: SocketAddr,
+) {
+    if !conn.is_multipath_enabled() {
+        tracing::warn!(
+            "connection={} multipath was requested but not negotiated (is the listener's \
+             transport.link.quic.multipath.enabled set?)",
+            conn.stable_id()
+        );
+        return;
+    }
+    // paths[0] is the primary path, already established by the handshake.
+    for spec in config.paths.iter().skip(1) {
+        let local = match resolve_local_ip(&spec.local) {
+            Ok(ip) => ip,
+            Err(e) => {
+                tracing::warn!("skipping path spec {spec:?}: {e}");
+                continue;
+            }
+        };
+        let remote = spec.remote.unwrap_or(primary_remote);
+        let tuple = backend::FourTuple::new(remote, Some(local));
+        let mut attempts = 0u32;
+        let mut created_logged = false;
+        loop {
+            let open = conn.open_path(tuple, backend::PathStatus::Available);
+            // OpenPath::path_id() is available before the future resolves
+            // (None on immediate rejection). After a RemoteCidsExhausted
+            // retry the established PathId may differ from this created
+            // line (each open_path call allocates anew) — harmless.
+            if !created_logged {
+                if let Some(id) = open.path_id() {
+                    tracing::info!(
+                        "connection={} path={id:?} local={local} remote={remote} state=created",
+                        conn.stable_id()
+                    );
+                    created_logged = true;
+                }
+            }
+            match open.await {
+                Ok(path) => {
+                    tracing::info!(
+                        "connection={} path={:?} local={local} remote={remote} state=validated",
+                        conn.stable_id(),
+                        path.id()
+                    );
+                    break;
+                }
+                // Right after the handshake the peer may not have issued
+                // enough CIDs for a new path yet; retry the transient error
+                // (same as noq's own tests).
+                Err(backend::PathError::RemoteCidsExhausted) if attempts < 50 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "connection={} path=? local={local} remote={remote} state=failed error={e}",
+                        conn.stable_id()
+                    );
+                    break;
+                }
+            }
+        }
     }
 }
 

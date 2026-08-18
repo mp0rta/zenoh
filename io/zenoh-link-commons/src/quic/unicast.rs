@@ -420,6 +420,24 @@ impl<F: AcceptorCallback> QuicServer<F> {
         let addr = get_quic_addr(&epaddr).await?;
         let host = get_quic_host(&epaddr)?;
 
+        // The listener side only enables the multipath negotiation (paths
+        // are opened by the connecting side); it keeps its single wildcard
+        // socket, which receives every path's remote address.
+        #[cfg(feature = "quic_noq")]
+        let multipath_config =
+            crate::quic::multipath::MultipathConfig::from_endpoint_config(&epconf)?;
+        #[cfg(feature = "quic_noq")]
+        if multipath_config.is_some()
+            && (epconf.get(crate::BIND_INTERFACE).is_some()
+                || epconf.get(crate::BIND_SOCKET).is_some())
+        {
+            return Err(zerror!(
+                "multipath cannot be combined with #iface= or #bind= (the listener must stay \
+                 wildcard-bound to receive every path's remote address)"
+            )
+            .into());
+        }
+
         // Server config
         let mut server_crypto = TlsServerConfig::new(&epconf, is_secure)
             .await
@@ -450,6 +468,13 @@ impl<F: AcceptorCallback> QuicServer<F> {
         });
         {
             let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+            // Multipath is negotiated only if BOTH sides configure it.
+            #[cfg(feature = "quic_noq")]
+            if let Some(mp) = &multipath_config {
+                transport_config.max_concurrent_multipath_paths(mp.max_concurrent_paths);
+                transport_config.default_path_keep_alive_interval(Some(mp.keep_alive_interval));
+                transport_config.default_path_max_idle_timeout(Some(mp.max_idle_timeout));
+            }
             QuicTransportConfigurator(transport_config)
                 .configure_max_concurrent_streams(streams_conf.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
@@ -490,6 +515,8 @@ impl<F: AcceptorCallback> QuicServer<F> {
                 quic_endpoint,
                 tls_close_link_on_expiration: server_crypto.tls_close_link_on_expiration,
                 is_streamed,
+                #[cfg(feature = "quic_noq")]
+                multipath_enabled: multipath_config.is_some(),
                 inner: acceptor_params,
             },
             locator,
@@ -580,6 +607,21 @@ impl QuicClient {
         let epconf = endpoint.config();
         let dst_addr = get_quic_addr(&epaddr).await?;
 
+        #[cfg(feature = "quic_noq")]
+        let multipath_config =
+            crate::quic::multipath::MultipathConfig::from_endpoint_config(&epconf)?;
+        #[cfg(feature = "quic_noq")]
+        if multipath_config.is_some()
+            && (epconf.get(crate::BIND_INTERFACE).is_some()
+                || epconf.get(crate::BIND_SOCKET).is_some())
+        {
+            return Err(zerror!(
+                "multipath cannot be combined with #iface= or #bind= (per-path pinning is \
+                 configured via transport.link.quic.multipath.paths)"
+            )
+            .into());
+        }
+
         // Initialize the QUIC connection
         let mut client_crypto = TlsClientConfig::new(&epconf, is_secure)
             .await
@@ -599,18 +641,52 @@ impl QuicClient {
         // noq's `set_default_client_config` takes `&self` (quinn's takes `&mut self`).
         #[cfg_attr(feature = "quic_noq", allow(unused_mut))]
         let mut quic_endpoint = async {
-            let socket = QuicSocketConfig::new(&epconf)
-                .await
-                .map_err(|e| zerror!("error parsing socket config: {e}"))?
-                .new_link(&dst_addr)
-                .await?;
-            // create the Endpoint with the socket
             let runtime = backend::default_runtime()
                 .ok_or_else(|| std::io::Error::other("no async runtime found"))?;
+            // With multipath, the endpoint bundles one pinned socket per
+            // configured path (specs[0] = the primary/handshake socket);
+            // otherwise the single default socket is used. Create the
+            // default socket only in the single-socket branch so the demo's
+            // socket count stays meaningful.
+            #[cfg(feature = "quic_noq")]
+            let abstract_socket = match multipath_config.as_ref().filter(|mp| !mp.paths.is_empty())
+            {
+                Some(mp) => {
+                    use crate::quic::multipath::{resolve_local_ip, LocalSpec};
+                    let mut specs = Vec::with_capacity(mp.paths.len());
+                    for path in &mp.paths {
+                        let ip = resolve_local_ip(&path.local)?;
+                        let pin = match &path.local {
+                            LocalSpec::Iface(name) => noq::SocketPin::Iface(name.clone()),
+                            LocalSpec::Ip(ip) => noq::SocketPin::Ip(*ip),
+                        };
+                        specs.push((pin, Some(ip)));
+                    }
+                    Box::new(noq::MultiSocket::bind(&specs, &runtime)?)
+                        as Box<dyn backend::AsyncUdpSocket>
+                }
+                None => {
+                    let socket = QuicSocketConfig::new(&epconf)
+                        .await
+                        .map_err(|e| zerror!("error parsing socket config: {e}"))?
+                        .new_link(&dst_addr)
+                        .await?;
+                    runtime.wrap_udp_socket(socket.into_std()?)?
+                }
+            };
+            #[cfg(not(feature = "quic_noq"))]
+            let abstract_socket = {
+                let socket = QuicSocketConfig::new(&epconf)
+                    .await
+                    .map_err(|e| zerror!("error parsing socket config: {e}"))?
+                    .new_link(&dst_addr)
+                    .await?;
+                runtime.wrap_udp_socket(socket.into_std()?)?
+            };
             ZResult::Ok(backend::Endpoint::new_with_abstract_socket(
                 EndpointConfig::default(),
                 None,
-                runtime.wrap_udp_socket(socket.into_std()?)?,
+                abstract_socket,
                 runtime,
             )?)
         }
@@ -633,6 +709,14 @@ impl QuicClient {
             QuicTransportConfigurator(&mut transport_config)
                 .configure_max_concurrent_streams(multistream.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
+            // Multipath is negotiated only if BOTH sides configure it; the
+            // per-path keep-alive/idle-timeout make path failure detectable.
+            #[cfg(feature = "quic_noq")]
+            if let Some(mp) = &multipath_config {
+                transport_config.max_concurrent_multipath_paths(mp.max_concurrent_paths);
+                transport_config.default_path_keep_alive_interval(Some(mp.keep_alive_interval));
+                transport_config.default_path_max_idle_timeout(Some(mp.max_idle_timeout));
+            }
             client_config.transport_config(transport_config.into());
             client_config
         });
@@ -654,6 +738,11 @@ impl QuicClient {
             .await
             .map_err(|e| zerror!("Can not create a new QUIC link bound to {}: {}", host, e))?;
 
+        // Wrap early: the multipath block below uses the backend-independent
+        // address accessors; `&QuicConnection` deref-coerces to
+        // `&backend::Connection` for the helpers.
+        let quic_conn = QuicConnection::new(quic_conn)?;
+
         let mut streams = None;
         if is_streamed {
             let quic_streams = QuicStreams::open(&quic_conn)
@@ -672,8 +761,29 @@ impl QuicClient {
             }
         };
 
+        #[cfg(feature = "quic_noq")]
+        if let Some(mp) = multipath_config {
+            // The primary path (PathId 0) is established by the handshake
+            // itself and noq emits no Established event for it, so log it
+            // explicitly here; the logger picks up every later path.
+            tracing::info!(
+                "connection={} path=PathId(0) local={:?} remote={} state=active (primary)",
+                quic_conn.stable_id(),
+                quic_conn.local_ip(),
+                quic_conn.remote_address()
+            );
+            crate::quic::multipath::spawn_path_event_logger((*quic_conn).clone(), "client");
+            // Opened in the background so link establishment is not blocked
+            // on secondary-path validation (a failed secondary must not stop
+            // the session).
+            let conn = (*quic_conn).clone();
+            zenoh_runtime::ZRuntime::Acceptor.spawn(async move {
+                crate::quic::multipath::open_additional_paths(&conn, &mp, dst_addr).await;
+            });
+        }
+
         Ok(Self {
-            quic_conn: QuicConnection::new(quic_conn)?,
+            quic_conn,
             streams,
             src_addr,
             dst_addr,
@@ -716,6 +826,10 @@ pub struct QuicAcceptor<F: AcceptorCallback> {
     quic_endpoint: backend::Endpoint,
     tls_close_link_on_expiration: bool,
     is_streamed: bool,
+    /// Whether multipath was enabled for this listener (drives the per-path
+    /// event logging on accepted connections).
+    #[cfg(feature = "quic_noq")]
+    multipath_enabled: bool,
     inner: QuicAcceptorParams<F>,
 }
 
@@ -800,6 +914,20 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
         // (their implementation is backend-dependent). `&QuicConnection`
         // deref-coerces to `&backend::Connection` for the helpers.
         let quic_conn = QuicConnection::new(quic_conn)?;
+
+        #[cfg(feature = "quic_noq")]
+        if self.multipath_enabled {
+            // The primary path is established by the handshake itself and
+            // noq emits no Established event for it (see the client side).
+            tracing::info!(
+                "connection={} path=PathId(0) local={:?} remote={} state=active (primary)",
+                quic_conn.stable_id(),
+                quic_conn.local_ip(),
+                quic_conn.remote_address()
+            );
+            crate::quic::multipath::spawn_path_event_logger((*quic_conn).clone(), "server");
+        }
+
         let streams = if self.is_streamed {
             Some(
                 QuicStreams::accept(&quic_conn)
