@@ -85,4 +85,4 @@ zenoh-runtime = { workspace = true }
 zenoh-util = { workspace = true }
 
 [package.metadata.cargo-machete]
-ignored = ["noq", "noq-proto", "rustls-webpki"]
+ignored = ["rustls-webpki"]

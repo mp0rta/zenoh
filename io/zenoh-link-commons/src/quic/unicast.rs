@@ -17,13 +17,19 @@ use std::{
     collections::HashMap,
     fmt,
     future::{Future, IntoFuture},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     ops::Deref,
     pin::Pin,
     sync::{atomic::AtomicBool, Arc},
 };
 
 use futures::FutureExt;
+#[cfg(feature = "quic_noq")]
+use noq::{
+    crypto::rustls::{QuicClientConfig, QuicServerConfig},
+    EndpointConfig,
+};
+#[cfg(not(feature = "quic_noq"))]
 use quinn::{
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
     EndpointConfig,
@@ -47,12 +53,25 @@ use crate::{
     LinkUnicast, NewLinkChannelSender,
 };
 
+// QUIC backend selection: quinn by default, noq (multipath) behind the
+// experimental `quic_noq` feature. See spec_draft.md section 4.
+#[cfg(feature = "quic_noq")]
+use noq as backend;
+#[cfg(not(feature = "quic_noq"))]
 use quinn as backend;
 
 #[derive(Clone)]
 pub struct QuicConnection {
     conn: backend::Connection,
     closed: Arc<AtomicBool>,
+    // noq exposes addresses per path rather than on the connection, and the
+    // initial path may be abandoned later under multipath. The initial
+    // (handshake) path's addresses are captured once at construction so the
+    // accessors below stay infallible and stable for the link's lifetime.
+    #[cfg(feature = "quic_noq")]
+    remote_address: SocketAddr,
+    #[cfg(feature = "quic_noq")]
+    local_ip: Option<IpAddr>,
 }
 
 impl fmt::Debug for QuicConnection {
@@ -65,10 +84,50 @@ impl fmt::Debug for QuicConnection {
 }
 
 impl QuicConnection {
-    fn new(conn: backend::Connection) -> Self {
-        Self {
+    fn new(conn: backend::Connection) -> ZResult<Self> {
+        #[cfg(feature = "quic_noq")]
+        let (remote_address, local_ip) = {
+            let path = conn
+                .path(backend::PathId::ZERO)
+                .ok_or_else(|| zerror!("QUIC connection has no initial path"))?;
+            (
+                path.remote_address()
+                    .map_err(|e| zerror!("cannot read the initial path's remote address: {}", e))?,
+                path.local_ip()
+                    .map_err(|e| zerror!("cannot read the initial path's local IP: {}", e))?,
+            )
+        };
+        Ok(Self {
             conn,
             closed: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "quic_noq")]
+            remote_address,
+            #[cfg(feature = "quic_noq")]
+            local_ip,
+        })
+    }
+
+    /// The remote address of the connection's initial (handshake) path.
+    pub fn remote_address(&self) -> SocketAddr {
+        #[cfg(not(feature = "quic_noq"))]
+        {
+            self.conn.remote_address()
+        }
+        #[cfg(feature = "quic_noq")]
+        {
+            self.remote_address
+        }
+    }
+
+    /// The local IP of the connection's initial (handshake) path, if known.
+    pub fn local_ip(&self) -> Option<IpAddr> {
+        #[cfg(not(feature = "quic_noq"))]
+        {
+            self.conn.local_ip()
+        }
+        #[cfg(feature = "quic_noq")]
+        {
+            self.local_ip
         }
     }
 
@@ -192,7 +251,7 @@ fn compute_alpn_protocols(ms_conf: &MultiStreamConfig, mr_conf: &MixedRelConfig)
 
 /// Priority-mapped uni streams.
 ///
-/// `quinn` doesn't allow direct stream index manipulation, but provides instead API guarantees:
+/// The QUIC backend doesn't allow direct stream index manipulation, but provides instead API guarantees:
 /// - streams are opened with increasing indexes
 /// - streams creation doesn't yield if it doesn't overflow the limit, hence `now_or_never`
 ///
@@ -235,7 +294,7 @@ impl UniStreams {
 
 /// A maybe-pending [`backend::RecvStream`].
 ///
-/// `quinn` streams are only "accepted" when data is received, so they start with a "pending" state,
+/// QUIC backend streams are only "accepted" when data is received, so they start with a "pending" state,
 /// and are notified by [`RecvStream::acceptor_task`].
 enum RecvStream {
     /// A pending channel waiting for [`RecvStream::acceptor_task`] notification.
@@ -529,6 +588,8 @@ impl QuicClient {
             None
         };
 
+        // noq's `set_default_client_config` takes `&self` (quinn's takes `&mut self`).
+        #[cfg_attr(feature = "quic_noq", allow(unused_mut))]
         let mut quic_endpoint = async {
             let socket = QuicSocketConfig::new(&epconf)
                 .await
@@ -604,7 +665,7 @@ impl QuicClient {
         };
 
         Ok(Self {
-            quic_conn: QuicConnection::new(quic_conn),
+            quic_conn: QuicConnection::new(quic_conn)?,
             streams,
             src_addr,
             dst_addr,
@@ -727,6 +788,10 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
         quic_conn: backend::Connection,
         src_addr: &SocketAddr,
     ) -> ZResult<LinkUnicast> {
+        // Wrap early: the address accessors below live on `QuicConnection`
+        // (their implementation is backend-dependent). `&QuicConnection`
+        // deref-coerces to `&backend::Connection` for the helpers.
+        let quic_conn = QuicConnection::new(quic_conn)?;
         let streams = if self.is_streamed {
             Some(
                 QuicStreams::accept(&quic_conn)
@@ -753,7 +818,7 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
         };
         let tls_close_link_on_expiration = self.tls_close_link_on_expiration;
         let link = (self.inner.make_link)(QuicLinkMaterial {
-            quic_conn: QuicConnection::new(quic_conn),
+            quic_conn,
             src_addr,
             dst_addr,
             streams,

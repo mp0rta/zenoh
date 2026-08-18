@@ -20,6 +20,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "quic_noq")]
+use noq::{crypto::rustls::HandshakeData, TransportConfig};
+#[cfg(not(feature = "quic_noq"))]
 use quinn::{crypto::rustls::HandshakeData, TransportConfig};
 use rustls::{
     crypto::CryptoProvider,
@@ -48,6 +51,9 @@ use crate::{
     ConfigurationInspector, LinkAuthId,
 };
 
+#[cfg(feature = "quic_noq")]
+use noq as backend;
+#[cfg(not(feature = "quic_noq"))]
 use quinn as backend;
 
 // ALPN protocols

@@ -14,6 +14,16 @@
 use std::sync::Arc;
 
 use bytes::BytesMut;
+#[cfg(feature = "quic_noq")]
+use noq_proto::{
+    crypto::{
+        self,
+        rustls::{QuicClientConfig, QuicServerConfig},
+        CryptoError,
+    },
+    transport_parameters, ConnectionId, PathId, Side, TransportError,
+};
+#[cfg(not(feature = "quic_noq"))]
 use quinn_proto::{
     crypto::{
         self,
@@ -27,6 +37,9 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use zenoh_core::lazy_static;
 use zenoh_result::ZResult;
 
+#[cfg(feature = "quic_noq")]
+use noq as backend;
+#[cfg(not(feature = "quic_noq"))]
 use quinn as backend;
 
 lazy_static! {
@@ -62,10 +75,26 @@ impl PlainTextSession {
 struct NoOpEncryptionKeys<T>(T);
 
 impl crypto::PacketKey for NoOpEncryptionKeys<Box<dyn crypto::PacketKey>> {
+    // noq's multipath support threads a PathId through the packet-protection
+    // traits; the no-op implementations ignore it either way.
+    #[cfg(not(feature = "quic_noq"))]
     fn encrypt(&self, _packet: u64, _buf: &mut [u8], _header_len: usize) {}
+    #[cfg(feature = "quic_noq")]
+    fn encrypt(&self, _path_id: PathId, _packet: u64, _buf: &mut [u8], _header_len: usize) {}
 
+    #[cfg(not(feature = "quic_noq"))]
     fn decrypt(
         &self,
+        _packet: u64,
+        _header: &[u8],
+        _payload: &mut BytesMut,
+    ) -> Result<(), CryptoError> {
+        Ok(())
+    }
+    #[cfg(feature = "quic_noq")]
+    fn decrypt(
+        &self,
+        _path_id: PathId,
         _packet: u64,
         _header: &[u8],
         _payload: &mut BytesMut,
@@ -122,7 +151,16 @@ impl PlainTextServerConfig {
 }
 
 impl crypto::Session for PlainTextSession {
+    // noq passes ConnectionId by value where quinn passes it by reference.
+    #[cfg(not(feature = "quic_noq"))]
     fn initial_keys(&self, dst_cid: &ConnectionId, side: Side) -> crypto::Keys {
+        let mut keys = self.0.initial_keys(dst_cid, side);
+        keys.header = Self::wrap_header_keys(keys.header);
+        keys.packet = Self::wrap_packet_keys(keys.packet);
+        keys
+    }
+    #[cfg(feature = "quic_noq")]
+    fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> crypto::Keys {
         let mut keys = self.0.initial_keys(dst_cid, side);
         keys.header = Self::wrap_header_keys(keys.header);
         keys.packet = Self::wrap_packet_keys(keys.packet);
@@ -176,7 +214,12 @@ impl crypto::Session for PlainTextSession {
         Some(Self::wrap_packet_keys(keys))
     }
 
+    #[cfg(not(feature = "quic_noq"))]
     fn is_valid_retry(&self, orig_dst_cid: &ConnectionId, header: &[u8], payload: &[u8]) -> bool {
+        self.0.is_valid_retry(orig_dst_cid, header, payload)
+    }
+    #[cfg(feature = "quic_noq")]
+    fn is_valid_retry(&self, orig_dst_cid: ConnectionId, header: &[u8], payload: &[u8]) -> bool {
         self.0.is_valid_retry(orig_dst_cid, header, payload)
     }
 
@@ -191,6 +234,8 @@ impl crypto::Session for PlainTextSession {
 }
 
 impl crypto::ClientConfig for PlainTextClientConfig {
+    // noq's config traits take `&self` where quinn's take `self: Arc<Self>`.
+    #[cfg(not(feature = "quic_noq"))]
     fn start_session(
         self: std::sync::Arc<Self>,
         version: u32,
@@ -204,9 +249,23 @@ impl crypto::ClientConfig for PlainTextClientConfig {
 
         Ok(Box::new(PlainTextSession(tls)))
     }
+    #[cfg(feature = "quic_noq")]
+    fn start_session(
+        &self,
+        version: u32,
+        server_name: &str,
+        params: &transport_parameters::TransportParameters,
+    ) -> Result<Box<dyn crypto::Session>, backend::ConnectError> {
+        let tls = self.inner.start_session(version, server_name, params)?;
+
+        Ok(Box::new(PlainTextSession(tls)))
+    }
 }
 
 impl crypto::ServerConfig for PlainTextServerConfig {
+    // noq passes ConnectionId by value and takes `&self` where quinn passes a
+    // reference and takes `self: Arc<Self>`.
+    #[cfg(not(feature = "quic_noq"))]
     fn initial_keys(
         &self,
         version: u32,
@@ -217,11 +276,28 @@ impl crypto::ServerConfig for PlainTextServerConfig {
         keys.packet = PlainTextSession::wrap_packet_keys(keys.packet);
         Ok(keys)
     }
+    #[cfg(feature = "quic_noq")]
+    fn initial_keys(
+        &self,
+        version: u32,
+        dst_cid: ConnectionId,
+    ) -> Result<crypto::Keys, crypto::UnsupportedVersion> {
+        let mut keys = self.inner.initial_keys(version, dst_cid)?;
+        keys.header = PlainTextSession::wrap_header_keys(keys.header);
+        keys.packet = PlainTextSession::wrap_packet_keys(keys.packet);
+        Ok(keys)
+    }
 
+    #[cfg(not(feature = "quic_noq"))]
     fn retry_tag(&self, version: u32, orig_dst_cid: &ConnectionId, packet: &[u8]) -> [u8; 16] {
         self.inner.retry_tag(version, orig_dst_cid, packet)
     }
+    #[cfg(feature = "quic_noq")]
+    fn retry_tag(&self, version: u32, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
+        self.inner.retry_tag(version, orig_dst_cid, packet)
+    }
 
+    #[cfg(not(feature = "quic_noq"))]
     fn start_session(
         self: Arc<Self>,
         version: u32,
@@ -230,6 +306,14 @@ impl crypto::ServerConfig for PlainTextServerConfig {
         Box::new(PlainTextSession(
             self.inner.clone().start_session(version, params),
         ))
+    }
+    #[cfg(feature = "quic_noq")]
+    fn start_session(
+        &self,
+        version: u32,
+        params: &transport_parameters::TransportParameters,
+    ) -> Box<dyn crypto::Session> {
+        Box::new(PlainTextSession(self.inner.start_session(version, params)))
     }
 }
 
