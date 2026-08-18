@@ -27,6 +27,7 @@ version = { workspace = true }
 [features]
 transport_quic = ["zenoh-link-quic"]
 transport_quic_datagram = ["zenoh-link-quic_datagram"]
+transport_quic_noq = ["transport_quic", "zenoh-link-quic/noq"]
 transport_serial = ["zenoh-link-serial"]
 transport_tcp = ["zenoh-config/transport_tcp", "zenoh-link-tcp"]
 transport_tls = ["zenoh-link-tls"]

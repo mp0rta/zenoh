@@ -40,6 +40,7 @@ quic = [
   "dep:zenoh-config",
   "tls",
 ]
+quic_noq = ["dep:noq", "dep:noq-proto", "quic"]
 tls = ["dep:rustls", "dep:rustls-webpki"]
 unsecure_quic = ["quic"]
 uring = []
@@ -50,6 +51,8 @@ base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 flume = { workspace = true }
 futures = { workspace = true }
+noq = { workspace = true, optional = true }
+noq-proto = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 quinn-proto = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
@@ -82,4 +85,4 @@ zenoh-runtime = { workspace = true }
 zenoh-util = { workspace = true }
 
 [package.metadata.cargo-machete]
-ignored = ["rustls-webpki"]
+ignored = ["noq", "noq-proto", "rustls-webpki"]
