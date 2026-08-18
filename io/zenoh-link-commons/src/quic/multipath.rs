@@ -142,12 +142,15 @@ impl MultipathConfig {
                 None => Ok(default),
             }
         };
-        let max_concurrent_paths = match epconf.get(MULTIPATH_MAX_PATHS) {
+        let max_concurrent_paths: u32 = match epconf.get(MULTIPATH_MAX_PATHS) {
             Some(s) => s
                 .parse()
                 .map_err(|e| zerror!("bad {MULTIPATH_MAX_PATHS}: {e}"))?,
             None => DEFAULT_MAX_CONCURRENT_PATHS,
         };
+        if max_concurrent_paths == 0 {
+            bail!("{MULTIPATH_MAX_PATHS} must be >= 1 (0 silently disables the negotiation)");
+        }
         Ok(Some(MultipathConfig {
             max_concurrent_paths,
             paths,
@@ -217,6 +220,14 @@ pub async fn open_additional_paths(
         );
         return;
     }
+    if config.paths.is_empty() {
+        tracing::info!(
+            "connection={} side=client multipath negotiated without configured paths \
+             (negotiation-only; no additional paths will be opened)",
+            conn.stable_id()
+        );
+        return;
+    }
     // paths[0] is the primary path, already established by the handshake.
     for spec in config.paths.iter().skip(1) {
         let local = match resolve_local_ip(&spec.local) {
@@ -239,16 +250,33 @@ pub async fn open_additional_paths(
             if !created_logged {
                 if let Some(id) = open.path_id() {
                     tracing::info!(
-                        "connection={} path={id:?} local={local} remote={remote} state=created",
+                        "connection={} path={id:?} side=client local={local} remote={remote} \
+                         state=created",
                         conn.stable_id()
                     );
                     created_logged = true;
                 }
             }
-            match open.await {
+            // Guard the await against connection teardown: noq never resolves
+            // a pending OpenPath when the connection dies, and the pending
+            // future would keep the connection state (and this task) alive
+            // forever.
+            let opened = tokio::select! {
+                res = open => res,
+                _ = conn.on_closed() => {
+                    tracing::info!(
+                        "connection={} side=client connection closed while opening additional \
+                         paths; stopping",
+                        conn.stable_id()
+                    );
+                    return;
+                }
+            };
+            match opened {
                 Ok(path) => {
                     tracing::info!(
-                        "connection={} path={:?} local={local} remote={remote} state=validated",
+                        "connection={} path={:?} side=client local={local} remote={remote} \
+                         state=validated",
                         conn.stable_id(),
                         path.id()
                     );
@@ -263,7 +291,8 @@ pub async fn open_additional_paths(
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "connection={} path=? local={local} remote={remote} state=failed error={e}",
+                        "connection={} path=? side=client local={local} remote={remote} \
+                         state=failed error={e}",
                         conn.stable_id()
                     );
                     break;
@@ -349,6 +378,13 @@ mod tests {
             let mp = MultipathConfig::from_endpoint_config(c).unwrap().unwrap();
             assert!(mp.paths.is_empty());
             assert_eq!(mp.max_concurrent_paths, 4);
+        });
+    }
+
+    #[test]
+    fn config_rejects_zero_max_paths() {
+        epconf_test("multipath=true;multipath_max_paths=0", |c| {
+            assert!(MultipathConfig::from_endpoint_config(c).is_err());
         });
     }
 

@@ -731,6 +731,27 @@
       //   /// Configure TCP write buffer size (bytes)
       //   // so_sndbuf: 123456,
       // },
+      // // Configure optional QUIC link specific parameters
+      // quic: {
+      //   /// Experimental Multipath QUIC settings. Effective only when Zenoh is built with the
+      //   /// experimental noq QUIC backend (`transport_quic_noq` feature); ignored otherwise.
+      //   /// Multipath must be enabled on BOTH the connecting and the listening side.
+      //   multipath: {
+      //     enabled: false,
+      //     /// Maximum number of concurrent paths to negotiate (default 4, must be >= 1).
+      //     // max_concurrent_paths: 4,
+      //     /// Path list for the connecting side. Each entry is "iface:<name>[@<remote_addr>]"
+      //     /// (one SO_BINDTODEVICE socket per NIC, needs root) or "local:<ip>[@<remote_addr>]".
+      //     /// The first entry pins the primary (handshake) path's local side; later entries are
+      //     /// opened as additional paths. A missing remote defaults to the primary remote from
+      //     /// the locator. Listeners leave this empty.
+      //     // paths: ["iface:wlan0", "iface:wwan0"],
+      //     /// Per-path keep-alive interval / max idle timeout in milliseconds
+      //     /// (defaults 1000 / 3000; these bound the path-failure detection time).
+      //     // keep_alive_interval_ms: 1000,
+      //     // max_idle_timeout_ms: 3000,
+      //   },
+      // },
     },
     /// Shared memory configuration.
     /// NOTE: shared memory can be used only if zenoh is compiled with "shared-memory" feature, otherwise

@@ -427,15 +427,29 @@ impl<F: AcceptorCallback> QuicServer<F> {
         let multipath_config =
             crate::quic::multipath::MultipathConfig::from_endpoint_config(&epconf)?;
         #[cfg(feature = "quic_noq")]
-        if multipath_config.is_some()
-            && (epconf.get(crate::BIND_INTERFACE).is_some()
-                || epconf.get(crate::BIND_SOCKET).is_some())
-        {
-            return Err(zerror!(
-                "multipath cannot be combined with #iface= or #bind= (the listener must stay \
-                 wildcard-bound to receive every path's remote address)"
-            )
-            .into());
+        if let Some(mp) = &multipath_config {
+            if epconf.get(crate::BIND_INTERFACE).is_some()
+                || epconf.get(crate::BIND_SOCKET).is_some()
+                || epconf.get(crate::DSCP).is_some()
+            {
+                return Err(zerror!(
+                    "multipath cannot be combined with #iface=, #bind= or #dscp= (the listener \
+                     must stay wildcard-bound to receive every path's remote address)"
+                )
+                .into());
+            }
+            if !addr.ip().is_unspecified() {
+                tracing::warn!(
+                    "multipath listener on the non-wildcard address {addr}: secondary paths \
+                     targeting other local addresses will not be received"
+                );
+            }
+            if !mp.paths.is_empty() {
+                tracing::info!(
+                    "the listener ignores multipath 'paths' entries (paths are opened by the \
+                     connecting side)"
+                );
+            }
         }
 
         // Server config
@@ -613,11 +627,13 @@ impl QuicClient {
         #[cfg(feature = "quic_noq")]
         if multipath_config.is_some()
             && (epconf.get(crate::BIND_INTERFACE).is_some()
-                || epconf.get(crate::BIND_SOCKET).is_some())
+                || epconf.get(crate::BIND_SOCKET).is_some()
+                || epconf.get(crate::DSCP).is_some())
         {
             return Err(zerror!(
-                "multipath cannot be combined with #iface= or #bind= (per-path pinning is \
-                 configured via transport.link.quic.multipath.paths)"
+                "multipath cannot be combined with #iface=, #bind= or #dscp= (per-path pinning \
+                 is configured via transport.link.quic.multipath.paths, and the multi-socket \
+                 endpoint does not apply per-socket options)"
             )
             .into());
         }
@@ -654,8 +670,19 @@ impl QuicClient {
                 Some(mp) => {
                     use crate::quic::multipath::{resolve_local_ip, LocalSpec};
                     let mut specs = Vec::with_capacity(mp.paths.len());
-                    for path in &mp.paths {
-                        let ip = resolve_local_ip(&path.local)?;
+                    for (i, path) in mp.paths.iter().enumerate() {
+                        // The primary entry must resolve (the handshake leaves
+                        // through it); an unusable secondary (e.g. a modem
+                        // that is down at startup) must not prevent
+                        // connecting — its open attempt will warn+skip too.
+                        let ip = match resolve_local_ip(&path.local) {
+                            Ok(ip) => ip,
+                            Err(e) if i == 0 => return Err(e),
+                            Err(e) => {
+                                tracing::warn!("skipping unusable path spec {path:?}: {e}");
+                                continue;
+                            }
+                        };
                         let pin = match &path.local {
                             LocalSpec::Iface(name) => noq::SocketPin::Iface(name.clone()),
                             LocalSpec::Ip(ip) => noq::SocketPin::Ip(*ip),
@@ -767,9 +794,12 @@ impl QuicClient {
             // itself and noq emits no Established event for it, so log it
             // explicitly here; the logger picks up every later path.
             tracing::info!(
-                "connection={} path=PathId(0) local={:?} remote={} state=active (primary)",
+                "connection={} path=PathId(0) side=client local={} remote={} state=active (primary)",
                 quic_conn.stable_id(),
-                quic_conn.local_ip(),
+                quic_conn
+                    .local_ip()
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
                 quic_conn.remote_address()
             );
             crate::quic::multipath::spawn_path_event_logger((*quic_conn).clone(), "client");
@@ -920,9 +950,12 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
             // The primary path is established by the handshake itself and
             // noq emits no Established event for it (see the client side).
             tracing::info!(
-                "connection={} path=PathId(0) local={:?} remote={} state=active (primary)",
+                "connection={} path=PathId(0) side=server local={} remote={} state=active (primary)",
                 quic_conn.stable_id(),
-                quic_conn.local_ip(),
+                quic_conn
+                    .local_ip()
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
                 quic_conn.remote_address()
             );
             crate::quic::multipath::spawn_path_event_logger((*quic_conn).clone(), "server");
