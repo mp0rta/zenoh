@@ -489,6 +489,9 @@ impl<F: AcceptorCallback> QuicServer<F> {
                 transport_config.default_path_keep_alive_interval(Some(mp.keep_alive_interval));
                 transport_config.default_path_max_idle_timeout(Some(mp.max_idle_timeout));
             }
+            // Emits qlog traces (with per-path events) when QLOGDIR is set.
+            #[cfg(feature = "quic_noq_qlog")]
+            transport_config.qlog_from_env("zenoh-mpquic");
             QuicTransportConfigurator(transport_config)
                 .configure_max_concurrent_streams(streams_conf.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
@@ -744,6 +747,9 @@ impl QuicClient {
                 transport_config.default_path_keep_alive_interval(Some(mp.keep_alive_interval));
                 transport_config.default_path_max_idle_timeout(Some(mp.max_idle_timeout));
             }
+            // Emits qlog traces (with per-path events) when QLOGDIR is set.
+            #[cfg(feature = "quic_noq_qlog")]
+            transport_config.qlog_from_env("zenoh-mpquic");
             client_config.transport_config(transport_config.into());
             client_config
         });

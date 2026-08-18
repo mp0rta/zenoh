@@ -41,6 +41,7 @@ quic = [
   "tls",
 ]
 quic_noq = ["dep:noq", "dep:noq-proto", "noq/multisocket", "quic"]
+quic_noq_qlog = ["noq-proto/qlog", "noq/qlog", "quic_noq"]
 tls = ["dep:rustls", "dep:rustls-webpki"]
 unsecure_quic = ["quic"]
 uring = []

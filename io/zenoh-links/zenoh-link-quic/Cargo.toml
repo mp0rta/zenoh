@@ -26,6 +26,7 @@ version = { workspace = true }
 
 [features]
 noq = ["zenoh-link-commons/quic_noq"]
+noq_qlog = ["noq", "zenoh-link-commons/quic_noq_qlog"]
 uring = []
 
 [dependencies]

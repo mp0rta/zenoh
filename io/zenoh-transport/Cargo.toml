@@ -45,6 +45,10 @@ transport_multilink = ["auth_pubkey"]
 transport_quic = ["zenoh-link/transport_quic"]
 transport_quic_datagram = ["zenoh-link/transport_quic_datagram"]
 transport_quic_noq = ["transport_quic", "zenoh-link/transport_quic_noq"]
+transport_quic_noq_qlog = [
+  "transport_quic_noq",
+  "zenoh-link/transport_quic_noq_qlog",
+]
 transport_serial = ["zenoh-link/transport_serial"]
 transport_tcp = ["zenoh-config/transport_tcp", "zenoh-link/transport_tcp"]
 transport_tls = ["zenoh-link/transport_tls"]
