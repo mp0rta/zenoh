@@ -735,7 +735,7 @@ impl TryFrom<&Config<'_>> for QuicMtuConfig {
 }
 
 /// Helper wrapper for configuring QUIC transport
-pub(crate) struct QuicTransportConfigurator<'a>(pub(crate) &'a mut backend::TransportConfig);
+pub(crate) struct QuicTransportConfigurator<'a>(pub(crate) &'a mut TransportConfig);
 
 impl QuicTransportConfigurator<'_> {
     pub(crate) fn configure_max_concurrent_streams(

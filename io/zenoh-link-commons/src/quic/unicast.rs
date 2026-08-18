@@ -107,7 +107,12 @@ impl QuicConnection {
         })
     }
 
-    /// The remote address of the connection's initial (handshake) path.
+    /// The connection's remote address.
+    ///
+    /// Under noq this is the initial (handshake) path's address, captured at
+    /// construction; under quinn it is the connection's current remote address
+    /// (which may change on migration). Zenoh only consumes it at link
+    /// construction and in `Display`/`Debug`, so the difference is cosmetic.
     pub fn remote_address(&self) -> SocketAddr {
         #[cfg(not(feature = "quic_noq"))]
         {
@@ -119,7 +124,10 @@ impl QuicConnection {
         }
     }
 
-    /// The local IP of the connection's initial (handshake) path, if known.
+    /// The connection's local IP, if known.
+    ///
+    /// Under noq this is the initial (handshake) path's local IP, captured at
+    /// construction; under quinn it is the connection's current local IP.
     pub fn local_ip(&self) -> Option<IpAddr> {
         #[cfg(not(feature = "quic_noq"))]
         {

@@ -68,6 +68,15 @@ impl PlainTextSession {
             remote: Box::new(NoOpEncryptionKeys(keys.remote)),
         }
     }
+
+    /// Wraps both key kinds of a key set. Single source of truth for the
+    /// no-op wrapping, shared by the backend-specific `initial_keys`
+    /// implementations so their bodies cannot drift apart.
+    fn wrap_keys(mut keys: crypto::Keys) -> crypto::Keys {
+        keys.header = Self::wrap_header_keys(keys.header);
+        keys.packet = Self::wrap_packet_keys(keys.packet);
+        keys
+    }
 }
 
 /// No-op wrapper for encryption keys.
@@ -151,20 +160,15 @@ impl PlainTextServerConfig {
 }
 
 impl crypto::Session for PlainTextSession {
-    // noq passes ConnectionId by value where quinn passes it by reference.
+    // noq passes ConnectionId by value where quinn passes it by reference
+    // (here and in `is_valid_retry` below).
     #[cfg(not(feature = "quic_noq"))]
     fn initial_keys(&self, dst_cid: &ConnectionId, side: Side) -> crypto::Keys {
-        let mut keys = self.0.initial_keys(dst_cid, side);
-        keys.header = Self::wrap_header_keys(keys.header);
-        keys.packet = Self::wrap_packet_keys(keys.packet);
-        keys
+        Self::wrap_keys(self.0.initial_keys(dst_cid, side))
     }
     #[cfg(feature = "quic_noq")]
     fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> crypto::Keys {
-        let mut keys = self.0.initial_keys(dst_cid, side);
-        keys.header = Self::wrap_header_keys(keys.header);
-        keys.packet = Self::wrap_packet_keys(keys.packet);
-        keys
+        Self::wrap_keys(self.0.initial_keys(dst_cid, side))
     }
 
     fn handshake_data(&self) -> Option<Box<dyn std::any::Any>> {
@@ -203,10 +207,7 @@ impl crypto::Session for PlainTextSession {
 
     fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<crypto::Keys> {
         let keys = self.0.write_handshake(buf)?;
-        Some(crypto::Keys {
-            header: Self::wrap_header_keys(keys.header),
-            packet: Self::wrap_packet_keys(keys.packet),
-        })
+        Some(Self::wrap_keys(keys))
     }
 
     fn next_1rtt_keys(&mut self) -> Option<crypto::KeyPair<Box<dyn crypto::PacketKey>>> {
@@ -271,10 +272,9 @@ impl crypto::ServerConfig for PlainTextServerConfig {
         version: u32,
         dst_cid: &ConnectionId,
     ) -> Result<crypto::Keys, crypto::UnsupportedVersion> {
-        let mut keys = self.inner.initial_keys(version, dst_cid)?;
-        keys.header = PlainTextSession::wrap_header_keys(keys.header);
-        keys.packet = PlainTextSession::wrap_packet_keys(keys.packet);
-        Ok(keys)
+        Ok(PlainTextSession::wrap_keys(
+            self.inner.initial_keys(version, dst_cid)?,
+        ))
     }
     #[cfg(feature = "quic_noq")]
     fn initial_keys(
@@ -282,10 +282,9 @@ impl crypto::ServerConfig for PlainTextServerConfig {
         version: u32,
         dst_cid: ConnectionId,
     ) -> Result<crypto::Keys, crypto::UnsupportedVersion> {
-        let mut keys = self.inner.initial_keys(version, dst_cid)?;
-        keys.header = PlainTextSession::wrap_header_keys(keys.header);
-        keys.packet = PlainTextSession::wrap_packet_keys(keys.packet);
-        Ok(keys)
+        Ok(PlainTextSession::wrap_keys(
+            self.inner.initial_keys(version, dst_cid)?,
+        ))
     }
 
     #[cfg(not(feature = "quic_noq"))]
