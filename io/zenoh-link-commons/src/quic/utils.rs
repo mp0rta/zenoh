@@ -48,6 +48,8 @@ use crate::{
     ConfigurationInspector, LinkAuthId,
 };
 
+use quinn as backend;
+
 // ALPN protocols
 /// Protocol used by zenoh <= 1.8.0
 pub const PROTOCOL_LEGACY: &[u8] = b"hq-29";
@@ -616,7 +618,7 @@ pub fn base64_decode(data: &str) -> ZResult<Vec<u8>> {
         .map_err(|e| zerror!("Unable to perform base64 decoding: {e:?}"))?)
 }
 
-pub fn get_cert_common_name(conn: &quinn::Connection) -> ZResult<QuicAuthId> {
+pub fn get_cert_common_name(conn: &backend::Connection) -> ZResult<QuicAuthId> {
     let mut auth_id = QuicAuthId { auth_value: None };
     if let Some(pi) = conn.peer_identity() {
         let serv_certs = pi
@@ -639,7 +641,7 @@ pub fn get_cert_common_name(conn: &quinn::Connection) -> ZResult<QuicAuthId> {
 
 /// Returns the minimum value of the `not_after` field in the remote certificate chain.
 /// Returns `None` if the remote certificate chain is empty
-pub fn get_cert_chain_expiration(conn: &quinn::Connection) -> ZResult<Option<OffsetDateTime>> {
+pub fn get_cert_chain_expiration(conn: &backend::Connection) -> ZResult<Option<OffsetDateTime>> {
     let mut link_expiration: Option<OffsetDateTime> = None;
     if let Some(pi) = conn.peer_identity() {
         if let Ok(remote_certs) = pi.downcast::<Vec<rustls_pki_types::CertificateDer>>() {
@@ -690,7 +692,7 @@ impl QuicMtuConfig {
         if let Some(mtu_discovery_interval) =
             self.mtu_discovery_interval_secs.map(Duration::from_secs)
         {
-            let mut mtu_discovery_config = quinn::MtuDiscoveryConfig::default();
+            let mut mtu_discovery_config = backend::MtuDiscoveryConfig::default();
             mtu_discovery_config.interval(mtu_discovery_interval);
             quic_transport_conf.mtu_discovery_config(Some(mtu_discovery_config));
         }
@@ -727,7 +729,7 @@ impl TryFrom<&Config<'_>> for QuicMtuConfig {
 }
 
 /// Helper wrapper for configuring QUIC transport
-pub(crate) struct QuicTransportConfigurator<'a>(pub(crate) &'a mut quinn::TransportConfig);
+pub(crate) struct QuicTransportConfigurator<'a>(pub(crate) &'a mut backend::TransportConfig);
 
 impl QuicTransportConfigurator<'_> {
     pub(crate) fn configure_max_concurrent_streams(
@@ -749,7 +751,7 @@ impl QuicTransportConfigurator<'_> {
     }
 }
 
-pub(crate) fn get_negotiated_alpn(connection: &quinn::Connection) -> ZResult<Option<Vec<u8>>> {
+pub(crate) fn get_negotiated_alpn(connection: &backend::Connection) -> ZResult<Option<Vec<u8>>> {
     let handshake_data = connection
         .handshake_data()
         .ok_or_else(|| zerror!("No handshake data"))?;

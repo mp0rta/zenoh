@@ -47,9 +47,11 @@ use crate::{
     LinkUnicast, NewLinkChannelSender,
 };
 
+use quinn as backend;
+
 #[derive(Clone)]
 pub struct QuicConnection {
-    conn: quinn::Connection,
+    conn: backend::Connection,
     closed: Arc<AtomicBool>,
 }
 
@@ -63,7 +65,7 @@ impl fmt::Debug for QuicConnection {
 }
 
 impl QuicConnection {
-    fn new(conn: quinn::Connection) -> Self {
+    fn new(conn: backend::Connection) -> Self {
         Self {
             conn,
             closed: Arc::new(AtomicBool::new(false)),
@@ -74,14 +76,14 @@ impl QuicConnection {
     pub fn close(&self) -> bool {
         let closed = self.closed.swap(true, std::sync::atomic::Ordering::Relaxed);
         if !closed {
-            self.conn.close(quinn::VarInt::from_u32(0), &[0]);
+            self.conn.close(backend::VarInt::from_u32(0), &[0]);
         }
         !closed
     }
 }
 
 impl Deref for QuicConnection {
-    type Target = quinn::Connection;
+    type Target = backend::Connection;
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.conn
@@ -111,7 +113,7 @@ impl MultiStreamConfig {
 
     /// Returns the maximum concurrent uni streams that should be opened, i.e. one per priority
     /// except Control for multistream, zero otherwise.
-    fn max_concurrent_uni_streams(&self) -> quinn::VarInt {
+    fn max_concurrent_uni_streams(&self) -> backend::VarInt {
         match self {
             Self::Disabled => 0u8.into(),
             _ => (Priority::NUM as u8 - 1).into(),
@@ -120,7 +122,7 @@ impl MultiStreamConfig {
 
     pub(crate) fn set_nb_concurrent_streams(
         &self,
-        quic_transport_conf: &mut quinn::TransportConfig,
+        quic_transport_conf: &mut backend::TransportConfig,
     ) {
         quic_transport_conf.max_concurrent_bidi_streams(1u8.into());
         quic_transport_conf.max_concurrent_uni_streams(self.max_concurrent_uni_streams());
@@ -200,7 +202,7 @@ fn compute_alpn_protocols(ms_conf: &MultiStreamConfig, mr_conf: &MixedRelConfig)
 ///
 /// Streams could be opened directly in [`LinkUnicastQuic`] constructor, but this one cannot fail
 /// because it's used in `Arc::new_cyclic`. So the failing part is extracted into this type.
-struct UniStreams(Vec<quinn::SendStream>);
+struct UniStreams(Vec<backend::SendStream>);
 
 impl UniStreams {
     /// Opens priority-mapped uni streams if supported.
@@ -208,7 +210,7 @@ impl UniStreams {
     /// This method leverages on QUIC ALPN (see [`compute_alpn_protocols`]): if the
     /// negotiated protocol is [`PROTOCOL_MULTI_STREAM`] or [`PROTOCOL_MULTI_STREAM_MIXED_REL`],
     /// then uni streams are opened. Otherwise, it returns None.
-    fn try_open(connection: &quinn::Connection) -> ZResult<Option<Self>> {
+    fn try_open(connection: &backend::Connection) -> ZResult<Option<Self>> {
         let alpn =
             get_negotiated_alpn(connection)?.expect("Zenoh ALPN should have been negotiated");
         let open_uni = |prio| {
@@ -231,15 +233,15 @@ impl UniStreams {
     }
 }
 
-/// A maybe-pending [`quinn::RecvStream`].
+/// A maybe-pending [`backend::RecvStream`].
 ///
 /// `quinn` streams are only "accepted" when data is received, so they start with a "pending" state,
 /// and are notified by [`RecvStream::acceptor_task`].
 enum RecvStream {
     /// A pending channel waiting for [`RecvStream::acceptor_task`] notification.
-    Pending(oneshot::Receiver<quinn::RecvStream>),
+    Pending(oneshot::Receiver<backend::RecvStream>),
     /// An accepted stream
-    Accepted(quinn::RecvStream),
+    Accepted(backend::RecvStream),
 }
 
 impl RecvStream {
@@ -250,8 +252,8 @@ impl RecvStream {
     /// cancellation to handle as the connection will be closed eventually, triggering an error
     /// if the task is still alive.
     async fn acceptor_task(
-        connection: quinn::Connection,
-        mut priority_txs: HashMap<usize, oneshot::Sender<quinn::RecvStream>>,
+        connection: backend::Connection,
+        mut priority_txs: HashMap<usize, oneshot::Sender<backend::RecvStream>>,
     ) -> ZResult<()> {
         while !priority_txs.is_empty() {
             let recv = connection.accept_uni().await?;
@@ -372,7 +374,7 @@ impl<F: AcceptorCallback> QuicServer<F> {
             .try_into()
             .map_err(|e| zerror!("Can not create a new QUIC listener on {addr}: {e}"))?;
 
-        let mut server_config = quinn::ServerConfig::with_crypto({
+        let mut server_config = backend::ServerConfig::with_crypto({
             if is_secure {
                 Arc::new(quic_config)
             } else {
@@ -393,9 +395,9 @@ impl<F: AcceptorCallback> QuicServer<F> {
                 .new_listener(&addr)
                 .await?;
             // create the Endpoint with the socket
-            let runtime = quinn::default_runtime()
+            let runtime = backend::default_runtime()
                 .ok_or_else(|| std::io::Error::other("no async runtime found"))?;
-            ZResult::Ok(quinn::Endpoint::new_with_abstract_socket(
+            ZResult::Ok(backend::Endpoint::new_with_abstract_socket(
                 EndpointConfig::default(),
                 Some(server_config),
                 runtime.wrap_udp_socket(socket.into_std()?)?,
@@ -534,9 +536,9 @@ impl QuicClient {
                 .new_link(&dst_addr)
                 .await?;
             // create the Endpoint with the socket
-            let runtime = quinn::default_runtime()
+            let runtime = backend::default_runtime()
                 .ok_or_else(|| std::io::Error::other("no async runtime found"))?;
-            ZResult::Ok(quinn::Endpoint::new_with_abstract_socket(
+            ZResult::Ok(backend::Endpoint::new_with_abstract_socket(
                 EndpointConfig::default(),
                 None,
                 runtime.wrap_udp_socket(socket.into_std()?)?,
@@ -551,14 +553,14 @@ impl QuicClient {
             .try_into()
             .map_err(|e| zerror!("Can not get QUIC config {host}: {e}"))?;
         quic_endpoint.set_default_client_config({
-            let mut client_config = quinn::ClientConfig::new({
+            let mut client_config = backend::ClientConfig::new({
                 if is_secure {
                     Arc::new(quic_config)
                 } else {
                     Arc::new(PlainTextClientConfig::new(quic_config.into()))
                 }
             });
-            let mut transport_config = quinn::TransportConfig::default();
+            let mut transport_config = backend::TransportConfig::default();
             QuicTransportConfigurator(&mut transport_config)
                 .configure_max_concurrent_streams(multistream.as_ref())
                 .configure_mtu(&QuicMtuConfig::try_from(&epconf)?);
@@ -642,7 +644,7 @@ impl<F: AcceptorCallback> fmt::Debug for QuicAcceptorParams<F> {
 }
 
 pub struct QuicAcceptor<F: AcceptorCallback> {
-    quic_endpoint: quinn::Endpoint,
+    quic_endpoint: backend::Endpoint,
     tls_close_link_on_expiration: bool,
     is_streamed: bool,
     inner: QuicAcceptorParams<F>,
@@ -664,7 +666,7 @@ impl<F: AcceptorCallback> fmt::Debug for QuicAcceptor<F> {
 
 impl<F: AcceptorCallback> QuicAcceptor<F> {
     pub async fn accept_task(self) -> ZResult<()> {
-        async fn accept_connection(acceptor: quinn::Accept<'_>) -> ZResult<quinn::Connection> {
+        async fn accept_connection(acceptor: backend::Accept<'_>) -> ZResult<backend::Connection> {
             let qc = acceptor
                 .await
                 .ok_or_else(|| zerror!("Can not accept QUIC connections: acceptor closed"))?;
@@ -719,10 +721,10 @@ impl<F: AcceptorCallback> QuicAcceptor<F> {
         Ok(())
     }
 
-    /// Handles an accepted [`quinn::Connection`], returning a link made by the provided callback.
+    /// Handles an accepted [`backend::Connection`], returning a link made by the provided callback.
     async fn handle_accepted_connection(
         &self,
-        quic_conn: quinn::Connection,
+        quic_conn: backend::Connection,
         src_addr: &SocketAddr,
     ) -> ZResult<LinkUnicast> {
         let streams = if self.is_streamed {
@@ -775,7 +777,7 @@ pub struct QuicLinkMaterial {
 }
 
 pub struct QuicStreams {
-    send: [UnsafeCell<Option<quinn::SendStream>>; Priority::NUM],
+    send: [UnsafeCell<Option<backend::SendStream>>; Priority::NUM],
     recv: [UnsafeCell<Option<RecvStream>>; Priority::NUM],
     pub is_multistream: bool,
 }
@@ -803,7 +805,7 @@ impl fmt::Debug for QuicStreams {
 }
 
 impl QuicStreams {
-    async fn open(connection: &quinn::Connection) -> ZResult<Self> {
+    async fn open(connection: &backend::Connection) -> ZResult<Self> {
         let (send, recv) = connection
             .open_bi()
             .await
@@ -811,7 +813,7 @@ impl QuicStreams {
         Self::new(connection, send, recv).await
     }
 
-    async fn accept(connection: &quinn::Connection) -> ZResult<Self> {
+    async fn accept(connection: &backend::Connection) -> ZResult<Self> {
         let (send, recv) = connection
             .accept_bi()
             .await
@@ -820,9 +822,9 @@ impl QuicStreams {
     }
 
     async fn new(
-        connection: &quinn::Connection,
-        send: quinn::SendStream,
-        recv: quinn::RecvStream,
+        connection: &backend::Connection,
+        send: backend::SendStream,
+        recv: backend::RecvStream,
     ) -> ZResult<Self> {
         let uni_streams = UniStreams::try_open(connection)?;
         // Initialize the streams with Control bi stream
@@ -906,7 +908,7 @@ impl QuicStreams {
     ///
     /// There should be only one caller per priority.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn write_stream(&self, priority: Option<Priority>) -> &mut quinn::SendStream {
+    unsafe fn write_stream(&self, priority: Option<Priority>) -> &mut backend::SendStream {
         let prio = priority.unwrap_or(Priority::Control) as usize;
         unsafe { &mut *self.send[prio].get() }
             .as_mut()
@@ -924,7 +926,7 @@ impl QuicStreams {
     async unsafe fn read_stream(
         &self,
         priority: Option<Priority>,
-    ) -> ZResult<&mut quinn::RecvStream> {
+    ) -> ZResult<&mut backend::RecvStream> {
         let prio = priority.unwrap_or(Priority::Control) as usize;
         match unsafe { &mut *self.recv[prio].get() }
             .as_mut()

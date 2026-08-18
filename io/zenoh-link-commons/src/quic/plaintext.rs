@@ -27,6 +27,8 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use zenoh_core::lazy_static;
 use zenoh_result::ZResult;
 
+use quinn as backend;
+
 lazy_static! {
     /// Unsecure QUIC clients trust any certified key-pair, we generate a single one per Zenoh process
     pub(crate) static ref SELF_SIGNED_CERT: ZResult<CertifiedKey<KeyPair>> =
@@ -194,7 +196,7 @@ impl crypto::ClientConfig for PlainTextClientConfig {
         version: u32,
         server_name: &str,
         params: &transport_parameters::TransportParameters,
-    ) -> Result<Box<dyn crypto::Session>, quinn::ConnectError> {
+    ) -> Result<Box<dyn crypto::Session>, backend::ConnectError> {
         let tls = self
             .inner
             .clone()
