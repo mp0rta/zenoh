@@ -1,0 +1,13 @@
+# ROS 2 demo image for the MPQUIC PoC (Phase B): talker/listener with the
+# CycloneDDS RMW, plus the network tools the netns demo needs. The
+# zenoh-bridge-ros2dds binary is built on the host and bind-mounted in.
+FROM ros:jazzy-ros-base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-jazzy-rmw-cyclonedds-cpp \
+    ros-jazzy-demo-nodes-cpp \
+    iproute2 \
+    iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
