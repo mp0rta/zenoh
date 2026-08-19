@@ -818,9 +818,16 @@ impl QuicClient {
                 .iter()
                 .filter_map(|path| match &path.local {
                     crate::quic::multipath::LocalSpec::Iface(name) => {
-                        crate::quic::multipath::resolve_local_ip(&path.local)
-                            .ok()
-                            .map(|ip| (name.clone(), ip))
+                        match crate::quic::multipath::resolve_local_ip(&path.local) {
+                            Ok(ip) => Some((name.clone(), ip)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "netmon will not watch interface {name}: {e} (its paths \
+                                     fall back to in-band timeouts)"
+                                );
+                                None
+                            }
+                        }
                     }
                     crate::quic::multipath::LocalSpec::Ip(_) => None,
                 })

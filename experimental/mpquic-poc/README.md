@@ -169,7 +169,22 @@ outage backlog), connection id unchanged (no session re-establishment).
   addr/route/rule groups, not RTNLGRP_LINK, so a carrier-only loss (cable
   pulled, IFF_UP retained) is not detected out-of-band — the in-band
   per-path idle timeout remains the detector for that class. Detection
-  latency is floored by netwatch's 250 ms debounce (~300 ms in practice).
+  latency is floored by netwatch's 250 ms debounce (~300 ms in practice;
+  the debounce resets on every netlink event, so sustained route churn can
+  defer detection further).
+- The out-of-band kill has a side effect on the *surviving* paths: noq's
+  `handle_network_change` clears the learned local IP of every remaining
+  path, so their next transmits carry no source IP and fall back to the
+  primary member socket — if that member's interface is the one that went
+  down, the survivor's egress stalls (silently dropped sends) until the
+  server's traffic lets noq re-learn the local IP. With the default 1 s
+  server-side keep-alive the stall is bounded by ~1 s; QUIC retransmission
+  masks it (the measured runs stayed loss-free). One monitor (netlink
+  socket + tasks) is spawned per multipath connection; a process-wide
+  shared monitor is an obvious follow-up. Paths on IPv4 link-local
+  (169.254/16) addresses would be treated as down by the monitor (netwatch
+  curates them out of its up-set) — don't combine `iface:` pinning with
+  link-local-only interfaces.
 - A secondary path whose interface was unusable at connect time (member
   socket skipped) cannot be opened later even if the interface recovers —
   and the inverse drift (unusable at connect, resolvable at open) yields a

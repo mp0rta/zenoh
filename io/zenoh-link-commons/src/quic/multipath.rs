@@ -374,12 +374,21 @@ pub fn spawn_network_monitor(
             iface_map
         );
         let on_closed = conn.on_closed();
+        // OnClosed holds only a weak handle by design; dropping our strong
+        // clone here keeps noq's implicit-close semantics intact (a monitor
+        // holding the connection alive would defeat it, and would leak the
+        // connection on link-construction failure paths that never call
+        // close explicitly).
+        drop(conn);
         tokio::pin!(on_closed);
         loop {
             tokio::select! {
                 updated = watcher.updated() => {
                     let Ok(state) = updated else {
-                        tracing::debug!("connection={conn_id} netmon watcher closed");
+                        tracing::warn!(
+                            "connection={conn_id} netmon watcher closed; falling back to \
+                             in-band path timeouts"
+                        );
                         break;
                     };
                     let up = up_ips(&state);
