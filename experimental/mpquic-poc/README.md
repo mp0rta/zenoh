@@ -6,6 +6,11 @@ draft-ietf-quic-multipath), demonstrating that a single Zenoh session keeps
 delivering messages over one QUIC connection with two network paths when one
 path goes down. Measured results: [RESULTS.md](RESULTS.md).
 
+Spec-section references (`spec section N`) throughout this directory and the
+code comments refer to the PoC specification `spec_draft.md`, which lives in
+the parent workspace next to the `zenoh/` and `noq/` checkouts (the same
+layout the `../noq/noq` path dependency already requires).
+
 ## Architecture
 
 ```
@@ -56,6 +61,25 @@ noq (fork, branch `feat/mpquic-poc`):
 - `noq/examples/multipath.rs` (new): standalone two-path demo/repro binary
   (both single-socket and `--ifaces` MultiSocket modes).
 
+## Quinn ↔ noq API correspondence
+
+What Zenoh's quic module actually uses, and where the two backends differ
+(divergences are absorbed as cfg pairs in `io/zenoh-link-commons/src/quic/`):
+
+| Zenoh requirement | quinn 0.11 API | noq 1.1 API | divergence |
+|---|---|---|---|
+| client/server endpoint | `Endpoint::new_with_abstract_socket(...)` | same | none |
+| connect | `Endpoint::connect(addr, name)` | same | none |
+| default client config | `set_default_client_config(&mut self, ..)` | `(&self, ..)` | receiver mutability |
+| accept | `Endpoint::accept()` → `Incoming` | same | none |
+| open/accept bi & uni streams | `Connection::{open_bi, accept_bi, open_uni, accept_uni}` | same | none |
+| read/write/close | `RecvStream`/`SendStream`/`Connection::close` | same | none |
+| remote address / local IP | `Connection::{remote_address, local_ip}` | per-`Path` accessors only (`Connection::path(id)`) | moved to paths; cached on `QuicConnection` at construction |
+| TLS wrapping | `crypto::rustls::{QuicClientConfig, QuicServerConfig}` | same paths under `noq::crypto` | none |
+| plaintext session (`udp?rel=1`) | `quinn_proto::crypto::{Session, ClientConfig, ServerConfig, PacketKey}` | `noq_proto::crypto::...` | `PacketKey::{encrypt, decrypt}` gained a `PathId` param; `ConnectionId` by value; config traits take `&self` instead of `Arc<Self>` |
+| transport knobs | `TransportConfig::{max_concurrent_*_streams, initial_mtu, ...}` | same, plus `max_concurrent_multipath_paths`, `default_path_{keep_alive_interval, max_idle_timeout}` | multipath knobs are noq-only |
+| multipath (noq-only) | — | `Connection::{open_path, path_events, is_multipath_enabled, on_closed}`, `FourTuple`, `PathStatus`, `MultiSocket` | no quinn counterpart |
+
 ## How the integration works
 
 - Compile-time backend selection; the default build still uses quinn
@@ -94,7 +118,9 @@ Topology (see `netns.sh`): `zc` (client, c0=10.10.0.1, c1=10.20.0.1) and `zs`
 (server, s0=10.10.0.2, s1=10.20.0.2), veth pairs per path. Root is required
 for netns + SO_BINDTODEVICE; without host sudo, `run-in-docker.sh` runs
 everything in a privileged container (topology is per-container, so run one
-scenario per invocation).
+scenario per invocation). Its default image is machine-local; point
+`MPQUIC_DOCKER_IMAGE` at any glibc-compatible image with iproute2/ping
+(e.g. `ubuntu:24.04` after `apt install iproute2 iputils-ping`).
 
 ```bash
 cargo build -p zenoh-examples --features zenoh/transport_quic_noq --examples
@@ -131,14 +157,23 @@ outage backlog), connection id unchanged (no session re-establishment).
   local port), and `iface:` pinning is Linux/Android + IPv4 + root
   (CAP_NET_RAW) only.
 - The endpoint-level `#iface=`, `#bind=` and `#dscp=` parameters conflict
-  with multipath and are rejected.
+  with multipath and are rejected. (`#dscp=` goes beyond the spec's
+  iface/bind rule: the multi-socket endpoint applies no per-socket options,
+  and silently dropping a configured DSCP would be worse than refusing it.)
 - The socket set is fixed at connect time: no dynamic interface add/remove
   (no netlink monitoring), no automatic re-open of an abandoned path after
   the interface recovers, no handshake-path rotation (mqvpn-style dynamics
   are follow-up work).
-- A secondary path that resolves at connect time but whose member socket was
-  skipped cannot be opened later; a member socket that breaks persistently
-  degrades into per-path idle timeouts rather than a fail-fast error.
+- A secondary path whose interface was unusable at connect time (member
+  socket skipped) cannot be opened later even if the interface recovers —
+  and the inverse drift (unusable at connect, resolvable at open) yields a
+  path with no matching member socket, whose validation fails and is logged.
+  A member socket that breaks persistently degrades into per-path idle
+  timeouts rather than a fail-fast error.
+- Server-side path-event logging subscribes when the accepted connection is
+  handed to Zenoh; a path opened extremely fast by the client can, in
+  principle, precede the subscription and omit the server's `state=active`
+  line (log-only impact).
 - `quic/...` datagram links and `udp/...?rel=1` links compile against the
   noq backend too (the quic module is shared) and the multipath config
   reaches datagram links via the shared configurator — both are unvalidated

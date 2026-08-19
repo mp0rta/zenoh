@@ -15,7 +15,7 @@
 //! Experimental Multipath QUIC support for the noq backend.
 //!
 //! Configured through `transport.link.quic.multipath` (flattened into the
-//! endpoint config by the configurator in `utils.rs`). See spec_draft.md
+//! endpoint config by the configurator in `utils.rs`). See the PoC spec
 //! sections 8-10 for the configuration model: the connecting side lists its
 //! paths (first entry = the primary/handshake path's local side, later
 //! entries are opened as additional paths after the handshake), the
@@ -167,7 +167,8 @@ impl MultipathConfig {
 }
 
 /// Spawns a task that logs path lifecycle events for this connection
-/// (spec_draft.md section 12). noq never emits `Established` for the primary
+/// (PoC spec section 12; see experimental/mpquic-poc/README.md for where the
+/// spec lives). noq never emits `Established` for the primary
 /// path (PathId 0, established by the handshake itself), so callers log that
 /// one explicitly at connection setup.
 pub fn spawn_path_event_logger(conn: backend::Connection, side: &'static str) {
@@ -205,7 +206,7 @@ pub fn spawn_path_event_logger(conn: backend::Connection, side: &'static str) {
 }
 
 /// Opens the configured additional paths on an established client connection
-/// (spec_draft.md section 9). Failures are logged, not fatal: the session
+/// (PoC spec section 9). Failures are logged, not fatal: the session
 /// continues on the primary path.
 pub async fn open_additional_paths(
     conn: &backend::Connection,
@@ -257,10 +258,10 @@ pub async fn open_additional_paths(
                     created_logged = true;
                 }
             }
-            // Guard the await against connection teardown: noq never resolves
-            // a pending OpenPath when the connection dies, and the pending
-            // future would keep the connection state (and this task) alive
-            // forever.
+            // Guard the await against connection teardown. The noq fork now
+            // resolves pending OpenPath futures on terminate; this guard is
+            // kept as defense in depth (upstream noq without that fix would
+            // otherwise leak the future, this task and the connection state).
             let opened = tokio::select! {
                 res = open => res,
                 _ = conn.on_closed() => {
@@ -292,7 +293,7 @@ pub async fn open_additional_paths(
                 Err(e) => {
                     tracing::warn!(
                         "connection={} path=? side=client local={local} remote={remote} \
-                         state=failed error={e}",
+                         state=failed reason={e}",
                         conn.stable_id()
                     );
                     break;
@@ -322,7 +323,7 @@ mod tests {
 
     #[test]
     fn parse_iface_with_remote() {
-        // demo(client.json5)で使う形そのまま
+        // the exact form the demo's client.json5 ships
         let p: PathSpec = "iface:c1@10.20.0.2:7447".parse().unwrap();
         assert_eq!(p.local, LocalSpec::Iface("c1".to_string()));
         assert_eq!(p.remote, Some("10.20.0.2:7447".parse().unwrap()));

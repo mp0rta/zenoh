@@ -54,7 +54,8 @@ use crate::{
 };
 
 // QUIC backend selection: quinn by default, noq (multipath) behind the
-// experimental `quic_noq` feature. See spec_draft.md section 4.
+// experimental `quic_noq` feature. See PoC spec section 4 (the spec's
+// location is noted in experimental/mpquic-poc/README.md).
 #[cfg(feature = "quic_noq")]
 use noq as backend;
 #[cfg(not(feature = "quic_noq"))]
