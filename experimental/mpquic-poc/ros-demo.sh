@@ -10,7 +10,7 @@
 # the local fork and bind-mounted in. Usage:
 #   ./ros-demo.sh            # full run: establish -> fail -> recover -> summary
 # Requires: docker, the mpquic-ros-demo:local image (Dockerfile.ros), certs
-# (gen-certs.sh), and a release-or-debug bridge binary at
+# (gen-certs.sh), and a debug-profile bridge binary at
 # ../../zenoh-plugin-ros2dds/target/debug/zenoh-bridge-ros2dds.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -73,12 +73,13 @@ sleep 5
 
 say "5/6 failing the primary path (c0 down) while the topic is flowing"
 LAST_BEFORE=$(grep "I heard" $LOG/listener.log | tail -1 | grep -oE "Hello World: [0-9]+" | grep -oE "[0-9]+")
+OFFSET=$(wc -c < $LOG/bridge-zc.log)   # only look at log lines written after the injection
 T_FAIL=$(now_ms)
 ip -n zc link set c0 down
 # wait for the out-of-band detection in the bridge log
 DETECT_MS=""
 for i in $(seq 1 100); do
-  if grep -q "state=failed" $LOG/bridge-zc.log; then
+  if tail -c +$((OFFSET + 1)) $LOG/bridge-zc.log | grep -q "state=failed"; then
     T_DETECT=$(now_ms); DETECT_MS=$((T_DETECT - T_FAIL)); break
   fi
   sleep 0.05
@@ -90,12 +91,12 @@ say "6/6 teardown and summary"
 kill %4 %3 %2 %1 2>/dev/null || true
 sleep 1
 
-TOTAL=$(grep -c "I heard" $LOG/listener.log || echo 0)
+TOTAL=$(grep -c "I heard" $LOG/listener.log || true)
 LAST_AFTER=$(grep "I heard" $LOG/listener.log | tail -1 | grep -oE "Hello World: [0-9]+" | grep -oE "[0-9]+")
 # gap check across the whole run (talker counts monotonically from 1)
 GAPS=$(grep -oE "Hello World: [0-9]+" $LOG/listener.log | grep -oE "[0-9]+" | awk "NR>1 && \$1 != prev+1 { print prev\"->\"\$1 } { prev=\$1 }")
-FAIL_REASON=$(grep -m1 "state=failed" $LOG/bridge-zc.log | sed "s/\x1b\[[0-9;]*m//g" | grep -oE "reason=[A-Za-z]+" || true)
-RECONNECTS=$(grep -c "state=active (primary)" $LOG/bridge-zc.log)
+FAIL_REASON=$(tail -c +$((OFFSET + 1)) $LOG/bridge-zc.log | grep -m1 "state=failed" | sed "s/\x1b\[[0-9;]*m//g" | grep -oE "reason=[A-Za-z]+" || true)
+RECONNECTS=$(grep -c "state=active (primary)" $LOG/bridge-zc.log || true)
 
 echo ""
 echo "----------------------------------------------------------"
@@ -106,8 +107,10 @@ echo " messages received      : $TOTAL (last seq before fail: ${LAST_BEFORE:-?},
 echo " sequence gaps          : ${GAPS:-none}"
 echo " QUIC connections used  : $RECONNECTS (1 = no reconnect, failover was seamless)"
 echo "----------------------------------------------------------"
-[ -n "$DETECT_MS" ] || exit 1
+[ -n "$DETECT_MS" ] || { echo "FAIL: path failure was never detected"; exit 1; }
 [ "$RECONNECTS" = "1" ] || { echo "FAIL: session reconnected"; exit 1; }
+[ -n "$LAST_BEFORE" ] && [ -n "$LAST_AFTER" ] && [ "$LAST_AFTER" -gt "$LAST_BEFORE" ] || {
+  echo "FAIL: no messages delivered after the failover (before=$LAST_BEFORE after=$LAST_AFTER)"; exit 1; }
 cp $LOG/*.log /ws/logs/ 2>/dev/null || true
 '
 echo "logs copied to workspace logs/ (bridge-zc, bridge-zs, talker, listener)"
