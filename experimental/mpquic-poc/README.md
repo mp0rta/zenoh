@@ -140,6 +140,34 @@ Expected: one connection id with `path=PathId(0) ... state=active (primary)`
 and `path=PathId(1) ... state=created` → `state=validated`; `ss -aunp` inside
 `zc` shows two device-bound sockets (`0.0.0.0%c0`, `0.0.0.0%c1`).
 
+## ROS 2 demo (one command)
+
+`ros-demo.sh` runs the whole Phase B scenario — a ROS 2 topic surviving a
+network-path failure — in a single privileged container and prints a summary
+(detection latency, message gaps, reconnect check):
+
+```
+ros2 talker --CycloneDDS-- bridge ==MPQUIC(2 paths)== bridge --CycloneDDS-- ros2 listener
+   (netns zc, domain 0)                                  (netns zs, domain 1)
+```
+
+```bash
+docker build -t mpquic-ros-demo:local -f experimental/mpquic-poc/Dockerfile.ros experimental/mpquic-poc
+( cd ../zenoh-plugin-ros2dds && cargo build -p zenoh-bridge-ros2dds )  # branch feat/mpquic-demo
+./experimental/mpquic-poc/gen-certs.sh
+./experimental/mpquic-poc/ros-demo.sh
+```
+
+The two sides use different `ROS_DOMAIN_ID`s so DDS cannot bypass the bridge,
+and CycloneDDS is pinned to loopback so failing the c0 interface cannot break
+the local DDS hop. Measured (3 consecutive runs): detection 268-269 ms
+(`UnusableAfterNetworkChange`, out-of-band), zero ROS message loss across the
+failover, one QUIC connection throughout.
+
+The bridge is `zenoh-bridge-ros2dds` from the sibling checkout's
+`feat/mpquic-demo` branch, which only patches the zenoh dependencies to this
+fork and enables `transport_quic_noq` (no code changes).
+
 ## Failure demo
 
 With the multipath scenario running, `netns.sh fail-primary` takes c0 down
