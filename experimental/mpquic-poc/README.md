@@ -160,10 +160,16 @@ outage backlog), connection id unchanged (no session re-establishment).
   with multipath and are rejected. (`#dscp=` goes beyond the spec's
   iface/bind rule: the multi-socket endpoint applies no per-socket options,
   and silently dropping a configured DSCP would be worse than refusing it.)
-- The socket set is fixed at connect time: no dynamic interface add/remove
-  (no netlink monitoring), no automatic re-open of an abandoned path after
-  the interface recovers, no handshake-path rotation (mqvpn-style dynamics
-  are follow-up work).
+- The socket set is fixed at connect time: no dynamic interface add/remove,
+  no automatic re-open of an abandoned path after the interface recovers, no
+  handshake-path rotation (mqvpn-style dynamics are follow-up work).
+- Out-of-band failure detection (the netwatch monitor, spec section 22) is
+  Linux, client-side and interface-pinned (`iface:`) paths only, and reacts
+  to admin-down / address-loss events: netwatch subscribes to netlink
+  addr/route/rule groups, not RTNLGRP_LINK, so a carrier-only loss (cable
+  pulled, IFF_UP retained) is not detected out-of-band — the in-band
+  per-path idle timeout remains the detector for that class. Detection
+  latency is floored by netwatch's 250 ms debounce (~300 ms in practice).
 - A secondary path whose interface was unusable at connect time (member
   socket skipped) cannot be opened later even if the interface recovers —
   and the inverse drift (unusable at connect, resolvable at open) yields a
