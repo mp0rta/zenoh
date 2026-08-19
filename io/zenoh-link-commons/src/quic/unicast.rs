@@ -810,6 +810,28 @@ impl QuicClient {
                 quic_conn.remote_address()
             );
             crate::quic::multipath::spawn_path_event_logger((*quic_conn).clone(), "client");
+            // Out-of-band failure detection for interface-pinned paths
+            // (spec section 22): reports paths whose interface went down as
+            // unrecoverable, instead of waiting for the in-band idle timeout.
+            let iface_map: Vec<(String, IpAddr)> = mp
+                .paths
+                .iter()
+                .filter_map(|path| match &path.local {
+                    crate::quic::multipath::LocalSpec::Iface(name) => {
+                        crate::quic::multipath::resolve_local_ip(&path.local)
+                            .ok()
+                            .map(|ip| (name.clone(), ip))
+                    }
+                    crate::quic::multipath::LocalSpec::Ip(_) => None,
+                })
+                .collect();
+            if !iface_map.is_empty() {
+                crate::quic::multipath::spawn_network_monitor(
+                    quic_endpoint.clone(),
+                    (*quic_conn).clone(),
+                    iface_map,
+                );
+            }
             // Opened in the background so link establishment is not blocked
             // on secondary-path validation (a failed secondary must not stop
             // the session).

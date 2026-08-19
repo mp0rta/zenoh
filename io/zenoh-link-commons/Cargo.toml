@@ -40,7 +40,14 @@ quic = [
   "dep:zenoh-config",
   "tls",
 ]
-quic_noq = ["dep:noq", "dep:noq-proto", "noq/multisocket", "quic"]
+quic_noq = [
+  "dep:n0-watcher",
+  "dep:netwatch",
+  "dep:noq",
+  "dep:noq-proto",
+  "noq/multisocket",
+  "quic",
+]
 quic_noq_qlog = ["noq-proto/qlog", "noq/qlog", "quic_noq"]
 tls = ["dep:rustls", "dep:rustls-webpki"]
 unsecure_quic = ["quic"]
@@ -52,6 +59,8 @@ base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 flume = { workspace = true }
 futures = { workspace = true }
+n0-watcher = { workspace = true, optional = true }
+netwatch = { workspace = true, optional = true }
 noq = { workspace = true, optional = true }
 noq-proto = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }

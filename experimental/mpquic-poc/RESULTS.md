@@ -63,6 +63,45 @@ SIGINT without panics.
 | 9 | No changes to ROS 2 or zenoh-bridge-ros2dds | diff vs `main` touches only manifests, `io/zenoh-link-commons/src/quic/`, `commons/zenoh-config`, `DEFAULT_CONFIG.json5` and `experimental/mpquic-poc/` |
 | 10 | Custom scheduling left for a later phase | not implemented; noq's current policy and the insertion seams are documented in README.md |
 
+## Detection-latency follow-up (2026-08-19)
+
+The 3.08 s detection is exactly the configured per-path `max_idle_timeout`
+(3000 ms): this PoC detects path failure **in-band only** (noq's
+`PathTimer::PathIdle`, floored at 3×PTO per RFC 9000 §10.1 guidance,
+`noq-proto/src/connection/mod.rs:883-896`).
+
+Attempting to tighten the in-band timers destabilized the idle secondary
+path — it timed out *without any failure being injected*:
+
+| keep-alive / idle (ms) | outcome |
+|---|---|
+| 1000 / 3000 (default) | stable; detection 3.08 s |
+| 300 / 1000 | PathId(1) `TimedOut` ~1.45 s after validation, no failure injected |
+| 200 / 600 | PathId(1) `TimedOut` ~0.95 s after validation, no failure injected |
+
+So sub-second in-band detection is not reachable by configuration alone with
+current noq: the per-path keep-alive fails to hold an idle (non-scheduled)
+path at sub-second intervals (suspects: the 3×PTO idle floor vs a fresh
+path's initial RTT estimate, and `ping_path(path_id).ok()` discarding errors
+at `mod.rs:2550-2552`). Worth an upstream issue with this reproduction.
+A second upstream-note candidate found during final review: `open_path`
+called after the connection has terminated still inserts an undrained
+watch sender (no fail-fast on `state.error`), reopening the pending-forever
+window the fork's terminate fix closed — Zenoh is protected by its
+`on_closed` select guard.
+
+Comparison with mqvpn (which detects the same event in milliseconds): mqvpn's
+speed does not come from QUIC timers at all. It watches netlink
+(`RTM_NEWLINK` with `IFLA_OPERSTATE` down / `IFF_UP` cleared, `RTM_DELLINK`)
+and removes the path immediately on the kernel event
+(`src/platform/linux/netlink_mon.c`, `remove_path_by_index`); its *in-band*
+fallback is far slower than ours (xquic ping every 15 s, idle timeout 120 s).
+The equivalent hook exists in noq (`Endpoint::handle_network_change` +
+`NetworkChangeHint`, used by iroh's netmon) — wiring a netlink monitor to it
+is the future-work item already scoped out in the spec (section 3), and would
+give ms-class detection for local interface failures; in-band timers would
+remain the safety net for remote/mid-path failures.
+
 ## Standalone noq ladder (Testing Order steps 6a/6b, for reference)
 
 - 6a (noq default socket, two real local IPs): second path validated

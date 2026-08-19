@@ -303,6 +303,123 @@ pub async fn open_additional_paths(
     }
 }
 
+/// The out-of-band verdict passed to noq when the local interface set
+/// changes: a path is recoverable iff its local IP is still present on an
+/// up interface. Paths whose local IP noq has not learned yet are treated
+/// as recoverable (the in-band timers remain the safety net for them).
+#[derive(Debug)]
+struct NetmonHint {
+    conn_id: usize,
+    up_ips: std::collections::HashSet<IpAddr>,
+}
+
+impl backend::NetworkChangeHint for NetmonHint {
+    fn is_path_recoverable(&self, path_id: backend::PathId, tuple: backend::FourTuple) -> bool {
+        let recoverable = match tuple.local_ip() {
+            Some(ip) => self.up_ips.contains(&ip.to_canonical()),
+            None => true,
+        };
+        tracing::info!(
+            "connection={} path={path_id:?} netmon verdict: local={:?} recoverable={recoverable}",
+            self.conn_id,
+            tuple.local_ip()
+        );
+        recoverable
+    }
+}
+
+/// The set of local IPs currently assigned to *up* interfaces. Raw
+/// per-interface address lists are unusable here: `ip link set <dev> down`
+/// keeps the IPv4 addresses assigned (only routes are flushed), so only the
+/// up-filtered `local_addresses` set reflects usability.
+fn up_ips(state: &netwatch::netmon::State) -> std::collections::HashSet<IpAddr> {
+    state
+        .local_addresses
+        .regular
+        .iter()
+        .chain(state.local_addresses.loopback.iter())
+        .map(|ip| ip.to_canonical())
+        .collect()
+}
+
+/// Spawns the out-of-band interface monitor for one client connection
+/// (PoC spec section 22): on interface loss, the paths whose local IPs
+/// vanished are reported unrecoverable through noq's
+/// `Endpoint::handle_network_change`, which abandons them within
+/// milliseconds instead of waiting for the in-band idle timeout (the
+/// timeout stays armed as the safety net). The task owns the monitor for
+/// its whole life and ends with the connection.
+pub fn spawn_network_monitor(
+    endpoint: backend::Endpoint,
+    conn: backend::Connection,
+    iface_map: Vec<(String, IpAddr)>,
+) {
+    let conn_id = conn.stable_id();
+    zenoh_runtime::ZRuntime::Acceptor.spawn(async move {
+        use n0_watcher::Watcher;
+        let monitor = match netwatch::netmon::Monitor::new().await {
+            Ok(monitor) => monitor,
+            Err(e) => {
+                tracing::warn!(
+                    "connection={conn_id} netmon unavailable ({e}); path failures will be \
+                     detected by the in-band idle timeout only"
+                );
+                return;
+            }
+        };
+        let mut watcher = monitor.interface_state();
+        let mut known_up = up_ips(&watcher.get());
+        tracing::debug!(
+            "connection={conn_id} netmon: watching {:?}, currently up: {known_up:?}",
+            iface_map
+        );
+        let on_closed = conn.on_closed();
+        tokio::pin!(on_closed);
+        loop {
+            tokio::select! {
+                updated = watcher.updated() => {
+                    let Ok(state) = updated else {
+                        tracing::debug!("connection={conn_id} netmon watcher closed");
+                        break;
+                    };
+                    let up = up_ips(&state);
+                    let mut lost_tracked = false;
+                    for (name, ip) in &iface_map {
+                        let ip = ip.to_canonical();
+                        match (known_up.contains(&ip), up.contains(&ip)) {
+                            (true, false) => {
+                                lost_tracked = true;
+                                tracing::warn!(
+                                    "connection={conn_id} netmon: interface {name} lost {ip}; \
+                                     marking its paths unrecoverable"
+                                );
+                            }
+                            (false, true) => {
+                                tracing::info!(
+                                    "connection={conn_id} netmon: interface {name} regained {ip} \
+                                     (paths are not re-opened automatically)"
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    if lost_tracked {
+                        endpoint.handle_network_change(Some(std::sync::Arc::new(NetmonHint {
+                            conn_id,
+                            up_ips: up.clone(),
+                        })));
+                    }
+                    known_up = up;
+                }
+                _ = &mut on_closed => break,
+            }
+        }
+        // The monitor is dropped here (its actor aborts on drop); keeping it
+        // owned until the loop ends is required for updates to keep flowing.
+        drop(monitor);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
