@@ -182,9 +182,10 @@ outage backlog), connection id unchanged (no session re-establishment).
   masks it (the measured runs stayed loss-free). One monitor (netlink
   socket + tasks) is spawned per multipath connection; a process-wide
   shared monitor is an obvious follow-up. Paths on IPv4 link-local
-  (169.254/16) addresses would be treated as down by the monitor (netwatch
-  curates them out of its up-set) — don't combine `iface:` pinning with
-  link-local-only interfaces.
+  (169.254/16) addresses are treated as down by the monitor whenever the
+  machine has any regular address (netwatch curates link-local addresses
+  out of its up-set in that case) — don't pin paths to link-local-addressed
+  interfaces.
 - A secondary path whose interface was unusable at connect time (member
   socket skipped) cannot be opened later even if the interface recovers —
   and the inverse drift (unusable at connect, resolvable at open) yields a
